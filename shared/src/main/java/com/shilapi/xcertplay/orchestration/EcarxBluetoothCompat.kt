@@ -83,8 +83,6 @@ internal class EcarxBluetoothCompat(private val context: Context) {
      * profiles first and then a few device-name/address APIs.
      */
     fun iphoneAddress(): String? {
-        connectedAddresses().firstOrNull()?.let { return it }
-
         val objects = listOf(
             bt,
             callObject(bt, "getBtSettings", "getSettings"),
@@ -102,13 +100,24 @@ internal class EcarxBluetoothCompat(private val context: Context) {
             "getConnectedDeviceAddress",
         )
         for (obj in objects) {
-            val name = nameMethods.firstNotNullOfOrNull { callString(obj, it) }
-            val address = addressMethods.firstNotNullOfOrNull { callString(obj, it) }
-            if (validMac(address) && (name == null || name.contains("iPhone", true))) {
+            var name: String? = null
+            for (method in nameMethods) {
+                name = callString(obj, method)
+                if (name != null) break
+            }
+            var address: String? = null
+            for (method in addressMethods) {
+                address = callString(obj, method)
+                if (validMac(address)) break
+            }
+            if (validMac(address) && name?.contains("iPhone", true) == true) {
                 return address!!.uppercase(Locale.US)
             }
         }
-        return null
+
+        // Some Ecarx firmware exposes only the connected address, without a name.
+        // Use it only as a last resort after the iPhone-specific APIs above.
+        return connectedAddresses().firstOrNull()
     }
 
     private fun validMac(value: String?): Boolean =
