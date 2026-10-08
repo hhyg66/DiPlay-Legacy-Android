@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - ecarx-bluetooth-compat
+      - nforetek-spp-test2
   pull_request:
   workflow_dispatch:
 permissions:
