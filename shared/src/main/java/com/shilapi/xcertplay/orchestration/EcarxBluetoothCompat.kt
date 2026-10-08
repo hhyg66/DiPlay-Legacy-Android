@@ -53,7 +53,9 @@ internal class EcarxBluetoothCompat(private val context: Context) {
     fun connectedAddresses(): Set<String> {
         val out = linkedSetOf<String>()
         val objects = listOf(
+            manager,
             bt,
+            callObject(manager, "getBtSettings", "getSettings"),
             callObject(bt, "getBtSettings", "getSettings"),
             callObject(bt, "getA2dp", "getA2dpInstance", "getBtA2dp"),
             callObject(bt, "getHfp", "getHfpInstance", "getBtHfp"),
