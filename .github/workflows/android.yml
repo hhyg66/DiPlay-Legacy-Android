@@ -1,7 +1,10 @@
 name: Android checks
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - ecarx-bluetooth-compat
+      - nforetek-spp-test2
   pull_request:
   workflow_dispatch:
 permissions:
@@ -22,7 +25,9 @@ jobs:
         with:
           packages: platform-tools platforms;android-37.0 build-tools;36.0.0 ndk;28.2.13676358
       - uses: gradle/actions/setup-gradle@v4
-      - name: Unit tests, lint and source-only debug build
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+      - name: Unit tests, lint and debug APK build
         run: ./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :mobile:lintDebug :mobile:assembleDebug --stacktrace
       - name: Test reports
         if: always()
@@ -33,3 +38,15 @@ jobs:
             shared/build/reports/tests/
             common/build/reports/tests/
             mobile/build/reports/lint-results-debug.html
+      - name: NForetek test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: diplay-nforetek-debug
+          path: mobile/build/outputs/apk/debug/*.apk
+      - name: Upload DiPlay debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiPlay-ecarx-bluetooth-debug
+          path: mobile/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

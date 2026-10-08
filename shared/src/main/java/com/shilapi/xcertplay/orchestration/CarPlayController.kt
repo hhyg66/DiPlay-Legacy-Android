@@ -44,6 +44,7 @@ import com.shilapi.xcertplay.network.WirelessHotspotBackend
 import com.shilapi.xcertplay.network.WirelessHotspotManager
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import com.shilapi.xcertplay.transport.BluetoothRfcommDuplexStream
+import com.shilapi.xcertplay.transport.NforetekSppBackend
 import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
 import com.shilapi.xcertplay.transport.Ch341I2cTransport
 import com.shilapi.xcertplay.transport.Ch341UsbHost
@@ -160,6 +161,7 @@ class CarPlayController(
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val bluetoothAdapter =
         (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+    private val ecarxBluetooth = EcarxBluetoothCompat(appContext)
     private val iphoneHost = IphoneUsbHost(
         appContext,
         usbManager,
@@ -203,6 +205,7 @@ class CarPlayController(
     @Volatile private var bonjour: CarPlayBonjour? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
+    @Volatile private var nforetekSpp: NforetekSppBackend? = null
     @Volatile private var wirelessTunnelChannel: Iap2Session? = null
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
@@ -891,17 +894,49 @@ class CarPlayController(
             onStatus(CarPlayStatus.WaitingForPairedIphone)
 
             val adapter = bluetoothAdapter
-                ?: throw IOException("Bluetooth adapter is unavailable")
-            if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
-            val device = selectWirelessBluetoothDevice(adapter)
-            val hostBluetoothMac = accessoryBluetoothMac(adapter)
-            debugLog(
-                "wireless selected Bluetooth target name=${device.name ?: "unknown"} " +
-                    "address=${device.address} localBt=$hostBluetoothMac",
-            )
+            val ecarxReady = ecarxBluetooth.isAvailable() && ecarxBluetooth.isReady()
+            var vendorSpp: NforetekSppBackend? = null
+            var targetAddress: String? = null
+            var hostBluetoothMac: String? = null
+
+            runCatching {
+                NforetekSppBackend.tryOpen(appContext, 3000)
+            }.onFailure {
+                debugLog("NForetek SPP open failed: " + (it.message ?: it.javaClass.simpleName))
+            }.getOrNull()?.let { spp ->
+                val candidates = runCatching { spp.connectedAddresses(1800) }
+                    .onFailure { debugLog("NForetek SPP device list failed", it) }
+                    .getOrDefault(emptyList())
+                val selected = config.wirelessBluetoothDeviceAddress?.takeIf { candidates.contains(it.uppercase(Locale.US)) }
+                    ?: candidates.firstOrNull()
+                if (selected != null) {
+                    vendorSpp = spp
+                    nforetekSpp = spp
+                    targetAddress = selected
+                    hostBluetoothMac = ecarxBluetooth.hostAddress()
+                    debugLog("NForetek SPP selected target address=" + selected + " localBt=" + (hostBluetoothMac ?: "unknown"))
+                } else {
+                    debugLog("NForetek SPP bound but no connected SPP device was reported; falling back to Android Bluetooth")
+                    spp.close()
+                }
+            }
+
+            if (vendorSpp == null) {
+                val btAdapter = adapter ?: throw IOException("Bluetooth adapter is unavailable")
+                if (!btAdapter.isEnabled && !ecarxReady) throw IOException("Bluetooth is not enabled")
+                if (ecarxReady) debugLog("ecarx Bluetooth API ready; Android adapter enabled=" + btAdapter.isEnabled)
+                val device = selectWirelessBluetoothDevice(btAdapter)
+                targetAddress = device.address
+                hostBluetoothMac = accessoryBluetoothMac(btAdapter)
+                debugLog("wireless Android Bluetooth target name=" + (device.name ?: "unknown") +
+                    " address=" + device.address + " localBt=" + hostBluetoothMac)
+            }
+
+            val selectedAddress = targetAddress ?: throw IOException("No Bluetooth target address")
+            val localBluetoothMac = hostBluetoothMac ?: airPlayConfig.btMac
             val wirelessAirPlayConfig = airPlayConfig.copy(
                 deviceId = deviceIdentifier,
-                btMac = hostBluetoothMac,
+                btMac = localBluetoothMac,
             )
 
             onStatus(CarPlayStatus.AttachingNetwork)
@@ -953,20 +988,25 @@ class CarPlayController(
             }
 
             onStatus(CarPlayStatus.ConnectingBluetooth)
-            debugLog(
-                "wireless RFCOMM connecting address=${device.address} " +
-                    "uuid=$IAP2_IPHONE_UUID",
-            )
-            val socket = device
+            debugLog("wireless RFCOMM/SPP connecting address=" + selectedAddress + " uuid=" + IAP2_IPHONE_UUID)
+            val stream: BlockingDuplexByteStream
+            if (vendorSpp != null) {
+                stream = vendorSpp.connect(selectedAddress)
+                debugLog("wireless NForetek SPP connected address=" + selectedAddress)
+            } else {
+                val btAdapter = adapter ?: throw IOException("Bluetooth adapter is unavailable")
+                val device = btAdapter.getRemoteDevice(selectedAddress)
+                val socket = device
                     .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
-            connectBluetoothSocket(socket, device.address)
-            debugLog("wireless RFCOMM connected address=${device.address}")
+                connectBluetoothSocket(socket, selectedAddress)
+                debugLog("wireless RFCOMM connected address=" + selectedAddress)
+                stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+            }
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
                 return
             }
-            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
             val channel = Iap2Session.openWireless(
                 stream,
                 traceContext = "wireless-rfcomm",
@@ -978,7 +1018,7 @@ class CarPlayController(
                 return
             }
             val identification = config.identification.copy(
-                wireless = Iap2WirelessIdentification(hostBluetoothMac, hotspotInfo.ssid),
+                wireless = Iap2WirelessIdentification(localBluetoothMac, hotspotInfo.ssid),
             )
             val endpoint = Iap2WirelessCarPlayEndpoint(
                 ssid = hotspotInfo.ssid,
@@ -1237,6 +1277,10 @@ class CarPlayController(
         val activeSocket = bluetoothSocket
         bluetoothSocket = null
         if (activeSocket != null) closeBestEffort("wireless Bluetooth socket") { activeSocket.close() }
+
+        val activeNforetek = nforetekSpp
+        nforetekSpp = null
+        if (activeNforetek != null) closeBestEffort("NForetek SPP") { activeNforetek.close() }
     }
 
     private fun startIphone() {
@@ -1653,6 +1697,13 @@ class CarPlayController(
 
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
         val bonded = adapter.bondedDevices.orEmpty()
+        val ecarxAddress = ecarxBluetooth.iphoneAddress()
+        if (ecarxAddress != null) {
+            debugLog("ecarx Bluetooth connected device address=$ecarxAddress")
+            bonded.firstOrNull { it.address.equals(ecarxAddress, ignoreCase = true) }?.let { return it }
+            runCatching { return adapter.getRemoteDevice(ecarxAddress) }
+                .onFailure { debugLog("Could not create Android BluetoothDevice for Ecarx address=$ecarxAddress", it) }
+        }
         config.wirelessBluetoothDeviceAddress?.let { selected ->
             return bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }
                 ?: throw IOException("The selected iPhone is no longer paired. Choose it again in DiPlay.")
@@ -1821,7 +1872,7 @@ class CarPlayController(
         } catch (_: SecurityException) {
             null
         }
-        return listOfNotNull(address, settingsAddress)
+        return listOfNotNull(address, settingsAddress, ecarxBluetooth.hostAddress())
             .firstOrNull {
                 BLUETOOTH_ADDRESS.matches(it) &&
                     !it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true)
