@@ -30,6 +30,7 @@ internal class NforetekSppBackend(private val context: Context) : AutoCloseable 
         private const val T_LIST = 6
         private const val T_CONNECTED = 7
         private const val T_SEND = 8
+        private val MAC = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
         fun tryOpen(context: Context, timeoutMs: Long = 3000): NforetekSppBackend? {
             val b = NforetekSppBackend(context.applicationContext)
@@ -243,8 +244,8 @@ internal class NforetekSppBackend(private val context: Context) : AutoCloseable 
 
     override fun close() {
         if (closed) return
-        closed = true
         runCatching { transactBool(T_UNREGISTER) { it.writeStrongBinder(callback) } }
+        closed = true
         if (bound) runCatching { context.unbindService(connection) }
         synchronized(lock) { queue.clear(); lock.notifyAll() }
     }
@@ -252,7 +253,4 @@ internal class NforetekSppBackend(private val context: Context) : AutoCloseable 
     private fun validMac(value: String): Boolean =
         MAC.matches(value) && value != "00:00:00:00:00:00" && value != "02:00:00:00:00:00"
 
-    private companion object Mac {
-        val MAC = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
-    }
 }
