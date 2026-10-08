@@ -37,6 +37,11 @@ jobs:
             shared/build/reports/tests/
             common/build/reports/tests/
             mobile/build/reports/lint-results-debug.html
+      - name: NForetek test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: diplay-nforetek-debug
+          path: mobile/build/outputs/apk/debug/*.apk
       - name: Upload DiPlay debug APK
         if: success()
         uses: actions/upload-artifact@v4
