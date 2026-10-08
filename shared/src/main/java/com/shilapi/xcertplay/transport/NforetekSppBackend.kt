@@ -4,9 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.os.Binder
 import android.os.IBinder
-import android.os.Parcel
 import android.os.RemoteException
 import android.util.Log
 import java.io.IOException
@@ -51,71 +49,53 @@ internal class NforetekSppBackend(private val context: Context) : AutoCloseable 
     @Volatile private var command: IBinder? = null
     @Volatile private var activeAddress: String? = null
 
-    private val callback = object : Binder() {
-        init { attachInterface(null, CALLBACK_DESC) }
-
-        public override fun onTransact(code: Int, data: Parcel, reply: Parcel, flags: Int): Boolean {
-            if (code == INTERFACE_TRANSACTION) {
-                reply.writeString(CALLBACK_DESC)
-                return true
-            }
-            if (code !in 1..7) return super.onTransact(code, data, reply, flags)
-            data.enforceInterface(CALLBACK_DESC)
-            when (code) {
-                1 -> Log.i(TAG, "SPP service ready")
-                2 -> {
-                    val address = data.readString()
-                    val detail = data.readString()
-                    val state = data.readInt()
-                    val extra = data.readInt()
-                    Log.i(TAG, "SPP state address=" + address + " detail=" + detail + " state=" + state + " extra=" + extra)
-                    if (address != null) synchronized(lock) {
-                        if (state > 0) addresses.add(address.uppercase(Locale.US))
-                        else addresses.remove(address.uppercase(Locale.US))
-                        lock.notifyAll()
-                    }
-                }
-                3 -> {
-                    val address = data.readString()
-                    val error = data.readInt()
-                    Log.w(TAG, "SPP error address=" + address + " error=" + error)
-                    synchronized(lock) { lock.notifyAll() }
-                }
-                4 -> {
-                    val result = data.readInt()
-                    val list = data.createStringArray().orEmpty()
-                    val names = data.createStringArray().orEmpty()
-                    Log.i(TAG, "SPP list result=" + result + " addresses=" + list.contentToString() + " names=" + names.contentToString())
-                    synchronized(lock) {
-                        addresses.clear()
-                        list.filter { validMac(it) }.forEach { addresses.add(it.uppercase(Locale.US)) }
-                        lock.notifyAll()
-                    }
-                }
-                5 -> {
-                    val address = data.readString()
-                    val bytes = data.createByteArray()
-                    if (bytes != null && bytes.isNotEmpty()) synchronized(lock) {
-                        if (activeAddress == null || address.equals(activeAddress, true)) {
-                            queue.addLast(bytes)
-                            lock.notifyAll()
-                        }
-                    }
-                }
-                6 -> {
-                    val address = data.readString()
-                    val result = data.readInt()
-                    Log.d(TAG, "SPP send address=" + address + " result=" + result)
-                }
-                7 -> {
-                    val address = data.readString()
-                    Log.i(TAG, "SPP Apple iAP auth request address=" + address)
-                }
-            }
-            reply.writeNoException()
-            return true
+    private val callback = NforetekCallbackBinder(CALLBACK_DESC, object : NforetekCallbackBinder.Handler {
+        override fun onReady() {
+            Log.i(TAG, "SPP service ready")
         }
-    }
+
+        override fun onState(address: String?, detail: String?, state: Int, extra: Int) {
+            Log.i(TAG, "SPP state address=" + address + " detail=" + detail + " state=" + state + " extra=" + extra)
+            if (address != null) synchronized(lock) {
+                if (state > 0) addresses.add(address.uppercase(Locale.US))
+                else addresses.remove(address.uppercase(Locale.US))
+                lock.notifyAll()
+            }
+        }
+
+        override fun onError(address: String?, error: Int) {
+            Log.w(TAG, "SPP error address=" + address + " error=" + error)
+            synchronized(lock) { lock.notifyAll() }
+        }
+
+        override fun onConnectedList(result: Int, list: Array<String>?, names: Array<String>?) {
+            val addressesList = list.orEmpty()
+            val namesList = names.orEmpty()
+            Log.i(TAG, "SPP list result=" + result + " addresses=" + addressesList.contentToString() + " names=" + namesList.contentToString())
+            synchronized(lock) {
+                addresses.clear()
+                addressesList.filter { validMac(it) }.forEach { addresses.add(it.uppercase(Locale.US)) }
+                lock.notifyAll()
+            }
+        }
+
+        override fun onData(address: String?, bytes: ByteArray?) {
+            if (bytes != null && bytes.isNotEmpty()) synchronized(lock) {
+                if (activeAddress == null || address.equals(activeAddress, true)) {
+                    queue.addLast(bytes)
+                    lock.notifyAll()
+                }
+            }
+        }
+
+        override fun onSend(address: String?, result: Int) {
+            Log.d(TAG, "SPP send address=" + address + " result=" + result)
+        }
+
+        override fun onAppleIapAuth(address: String?) {
+            Log.i(TAG, "SPP Apple iAP auth request address=" + address)
+        }
+    })
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
