@@ -160,6 +160,7 @@ class CarPlayController(
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val bluetoothAdapter =
         (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+    private val ecarxBluetooth = EcarxBluetoothCompat(appContext)
     private val iphoneHost = IphoneUsbHost(
         appContext,
         usbManager,
@@ -892,7 +893,9 @@ class CarPlayController(
 
             val adapter = bluetoothAdapter
                 ?: throw IOException("Bluetooth adapter is unavailable")
-            if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
+            val ecarxReady = ecarxBluetooth.isAvailable() && ecarxBluetooth.isReady()
+            if (!adapter.isEnabled && !ecarxReady) throw IOException("Bluetooth is not enabled")
+            if (ecarxReady) debugLog("ecarx Bluetooth API ready; Android adapter enabled=${adapter.isEnabled}")
             val device = selectWirelessBluetoothDevice(adapter)
             val hostBluetoothMac = accessoryBluetoothMac(adapter)
             debugLog(
@@ -1653,6 +1656,13 @@ class CarPlayController(
 
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
         val bonded = adapter.bondedDevices.orEmpty()
+        val ecarxAddress = ecarxBluetooth.iphoneAddress()
+        if (ecarxAddress != null) {
+            debugLog("ecarx Bluetooth connected device address=$ecarxAddress")
+            bonded.firstOrNull { it.address.equals(ecarxAddress, ignoreCase = true) }?.let { return it }
+            runCatching { return adapter.getRemoteDevice(ecarxAddress) }
+                .onFailure { debugLog("Could not create Android BluetoothDevice for Ecarx address=$ecarxAddress", it) }
+        }
         config.wirelessBluetoothDeviceAddress?.let { selected ->
             return bonded.firstOrNull { it.address.equals(selected, ignoreCase = true) }
                 ?: throw IOException("The selected iPhone is no longer paired. Choose it again in DiPlay.")
@@ -1821,7 +1831,7 @@ class CarPlayController(
         } catch (_: SecurityException) {
             null
         }
-        return listOfNotNull(address, settingsAddress)
+        return listOfNotNull(address, settingsAddress, ecarxBluetooth.hostAddress())
             .firstOrNull {
                 BLUETOOTH_ADDRESS.matches(it) &&
                     !it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true)
