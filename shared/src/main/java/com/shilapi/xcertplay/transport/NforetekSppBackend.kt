@@ -54,7 +54,7 @@ internal class NforetekSppBackend(private val context: Context) : AutoCloseable 
     private val callback = object : Binder() {
         init { attachInterface(null, CALLBACK_DESC) }
 
-        override fun onTransact(code: Int, data: Parcel, reply: Parcel, flags: Int): Boolean {
+        protected override fun onTransact(code: Int, data: Parcel, reply: Parcel, flags: Int): Boolean {
             if (code == INTERFACE_TRANSACTION) {
                 reply.writeString(CALLBACK_DESC)
                 return true
